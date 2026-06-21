@@ -225,6 +225,19 @@ def to_decimal(v):
         return None
 
 
+def clean_rating(v):
+    """Normalize the masked S&P placeholder to None.
+
+    BondSupermart returns '***' for S&P on every bond because its ratings are
+    licensed and cannot be redistributed. Store that as NULL so the column never
+    holds a misleading placeholder. 'N.R' (Not Rated) is a real agency value and
+    is preserved as-is (e.g. Fitch).
+    """
+    if v in (None, "", "***"):
+        return None
+    return v
+
+
 def parse_price_ts(s):
     """'2026-06-19 08:58:00.3513' -> datetime (truncated to ms)."""
     if not s:
@@ -359,8 +372,8 @@ class DB:
             "bond_type": info.get("bondType"),
             "bond_sector": info.get("bondSector"),
             "bond_sub_sector": info.get("subSector"),
-            "sp_rating": info.get("bondSnpRating"),
-            "fitch_rating": info.get("bondFitchRating"),
+            "sp_rating": clean_rating(info.get("bondSnpRating")),
+            "fitch_rating": clean_rating(info.get("bondFitchRating")),
             "shariah_compliant": info.get("shariahCompliance"),
             "raw_json": json.dumps({"filter": {"bondInfo": info, "bondPerformance": perf}}),
             "scraped_at": dt.datetime.now(),
@@ -503,8 +516,9 @@ def phase1_filter(client, db):
         print("  ERROR: filter endpoint returned no JSON")
         return []
     bonds = data.get("bondList", []) or []
-    print(f"  filterCount={data.get('filterCount')}  bondList={len(bonds)}")
-    bond_ids = []  # (isin, bondId) for later phases
+    print(f"  bondList={len(bonds)}")
+    bond_ids = []  # (isin, bondId, listed) for later phases
+    listed_n = 0
     for b in bonds:
         info = b.get("bondInfo", {})
         perf = b.get("bondPerformance", {})
@@ -512,9 +526,17 @@ def phase1_filter(client, db):
         if not isin:
             continue
         db.upsert_bond_from_filter(info, perf)
-        bond_ids.append((isin, info.get("bondId")))
+        # "exchange-listed" for the live-price endpoint = on the iFAST Bond
+        # Express (bex). Other bonds return a maintenance HTML page.
+        listed = bool(
+            info.get("bexFullLotEnabled") == "Y"
+            or info.get("bexOddLotEnabled") == "Y"
+            or info.get("executionType")
+        )
+        listed_n += listed
+        bond_ids.append((isin, info.get("bondId"), listed))
     db.commit()
-    print(f"  upserted {len(bond_ids)} bonds into `bonds`")
+    print(f"  upserted {len(bond_ids)} bonds into `bonds`  ({listed_n} exchange-listed)")
     return bond_ids
 
 
@@ -568,7 +590,7 @@ def phase2_detail(client, db, bond_ids, fetch_chart=True, resume=False):
     print("\n=== PHASE 2: detail" + (" + chart" if fetch_chart else "") + " ===")
     done = db.done_set("detail") if resume else set()
     total = len(bond_ids)
-    for i, (isin, _bond_id) in enumerate(bond_ids, 1):
+    for i, (isin, _bond_id, _listed) in enumerate(bond_ids, 1):
         if isin in done:
             continue
         # Detail
@@ -600,39 +622,63 @@ def phase2_detail(client, db, bond_ids, fetch_chart=True, resume=False):
         db.commit()
 
 
+def _price_rows_from_data(data, sym_to_isin):
+    """Turn a price-endpoint Data dict into bond_prices rows."""
+    rows = []
+    for sym, rec in (data.get("Data") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        rows.append((
+            rec.get(PF_ISIN) or sym_to_isin.get(sym),
+            rec.get(PF_SYMBOL, sym),
+            to_decimal(rec.get(PF_BID_PRICE)),
+            to_decimal(rec.get(PF_ASK_PRICE)),
+            to_decimal(rec.get(PF_BID_YIELD)),
+            to_decimal(rec.get(PF_ASK_YIELD)),
+            to_decimal(rec.get(PF_CHG_BID)),
+            to_decimal(rec.get(PF_CHG_ASK)),
+            parse_price_ts(rec.get(PF_TIMESTAMP)),
+            dt.datetime.now(),
+        ))
+    return rows
+
+
 def phase3_prices(client, db, bond_ids, resume=False):
-    """Fetch live exchange prices in batches; only listed bonds return data."""
+    """Fetch live exchange prices for exchange-listed bonds, batched.
+
+    Only bonds on the iFAST Bond Express return data; everything else returns a
+    maintenance HTML page (and a single bad symbol poisons a whole batch), so we
+    restrict the symbol list to the exchange-listed set. If a batch still comes
+    back as non-JSON, we fall back to fetching each symbol individually.
+    """
     print("\n=== PHASE 3: live prices ===")
     done = db.done_set("price") if resume else set()
-    # Build symbol list: 8000.9.{bondId}
-    pending = [(isin, bid) for isin, bid in bond_ids if bid and isin not in done]
+    pending = [(isin, bid) for isin, bid, listed in bond_ids
+               if listed and bid and isin not in done]
+    print(f"  {len(pending)} exchange-listed bonds to price")
     batches = [pending[i:i + PRICE_BATCH] for i in range(0, len(pending), PRICE_BATCH)]
     total_rows = 0
     for bi, batch in enumerate(batches, 1):
-        symbols = [f"8000.9.{bid}" for _isin, bid in batch]
         sym_to_isin = {f"8000.9.{bid}": isin for isin, bid in batch}
         data = client.get_json(
-            f"{PRICE_URL}?symbolList={','.join(symbols)}",
+            f"{PRICE_URL}?symbolList={','.join(sym_to_isin)}",
             headers={"referer": f"{BASE}/bsm/bond-selector"},
             label=f"prices batch {bi}/{len(batches)}",
         )
-        rows = []
         if data and isinstance(data.get("Data"), dict):
-            for sym, rec in data["Data"].items():
-                if not isinstance(rec, dict):
-                    continue
-                rows.append((
-                    rec.get(PF_ISIN) or sym_to_isin.get(rec.get(PF_SYMBOL, sym)),
-                    rec.get(PF_SYMBOL, sym),
-                    to_decimal(rec.get(PF_BID_PRICE)),
-                    to_decimal(rec.get(PF_ASK_PRICE)),
-                    to_decimal(rec.get(PF_BID_YIELD)),
-                    to_decimal(rec.get(PF_ASK_YIELD)),
-                    to_decimal(rec.get(PF_CHG_BID)),
-                    to_decimal(rec.get(PF_CHG_ASK)),
-                    parse_price_ts(rec.get(PF_TIMESTAMP)),
-                    dt.datetime.now(),
-                ))
+            rows = _price_rows_from_data(data, sym_to_isin)
+        else:
+            # Batch poisoned -> retry symbol by symbol.
+            print(f"  batch {bi} non-JSON; falling back to per-symbol")
+            rows = []
+            for sym, isin in sym_to_isin.items():
+                one = client.get_json(
+                    f"{PRICE_URL}?symbolList={sym}",
+                    headers={"referer": f"{BASE}/bsm/bond-selector"},
+                    label=f"price {isin}",
+                )
+                if one and isinstance(one.get("Data"), dict):
+                    rows.extend(_price_rows_from_data(one, {sym: isin}))
         db.insert_prices(rows)
         for isin, _bid in batch:
             db.mark_done("price", isin)
