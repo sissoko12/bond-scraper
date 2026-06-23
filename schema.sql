@@ -88,6 +88,25 @@ CREATE TABLE IF NOT EXISTS bond_chart (
   KEY idx_isin (isin)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- Daily indicative price/yield snapshots (one row per bond per day), written
+-- by daily_price_update.py from the filter-list payload. Upserted on
+-- (isin, price_date) so a same-day re-run refreshes rather than duplicates.
+CREATE TABLE IF NOT EXISTS bond_prices_history (
+  id          INT AUTO_INCREMENT PRIMARY KEY,
+  isin        VARCHAR(32),
+  price_date  DATE,
+  bid_price   DECIMAL(18,6),
+  ask_price   DECIMAL(18,6),
+  bid_ytm     DECIMAL(18,6),
+  ask_ytm     DECIMAL(18,6),
+  bid_ytw     DECIMAL(18,6),
+  ask_ytw     DECIMAL(18,6),
+  scraped_at  DATETIME,
+  UNIQUE KEY uniq_isin_date (isin, price_date),
+  KEY idx_isin (isin),
+  KEY idx_date (price_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 -- Per-phase, per-bond progress so the scraper can resume.
 CREATE TABLE IF NOT EXISTS scrape_progress (
   phase    VARCHAR(32) NOT NULL,
