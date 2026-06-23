@@ -1,10 +1,10 @@
 #!/bin/bash
-# Wrapper for the daily BondSupermart price refresh, invoked from cron.
-# cron runs with a minimal environment, so we set everything explicitly.
+# Wrapper for the daily BondSupermart price refresh, invoked from launchd.
+# launchd runs with a minimal environment, so we set everything explicitly.
 
 set -euo pipefail
 
-REPO="/Users/netanelnevo/Desktop/finance project]/bondsupermart-scraper"
+REPO="/Users/netanelnevo/projects/bondsupermart-scraper"
 PYTHON="/opt/anaconda3/bin/python3"
 
 cd "$REPO"
