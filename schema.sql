@@ -37,6 +37,16 @@ CREATE TABLE IF NOT EXISTS bonds (
   fitch_rating        VARCHAR(32),
   shariah_compliant   VARCHAR(8),
   sukuk_investing     VARCHAR(8),
+  -- Indicative bid/ask snapshot lifted from the filter-list payload
+  -- (raw_json $.filter.bondInfo), available for ALL bonds, not just the
+  -- exchange-listed set served by bond_prices.
+  bid_price           DECIMAL(18,6),
+  ask_price           DECIMAL(18,6),
+  bid_ytm             DECIMAL(18,6),
+  ask_ytm             DECIMAL(18,6),
+  bid_ytw             DECIMAL(18,6),
+  ask_ytw             DECIMAL(18,6),
+  price_updated_at    DATETIME,
   raw_json            LONGTEXT,
   scraped_at          DATETIME,
   PRIMARY KEY (isin),
