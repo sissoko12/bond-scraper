@@ -1,0 +1,42 @@
+name: Daily Price Update
+
+# Runs every day at 20:00 UTC (= 23:00 Israel time during IDT / summer,
+# 22:00 during IST / winter — after the Asian markets close).
+#
+# NOTE: daily_price_update.py writes to a MySQL instance. GitHub-hosted
+# runners CANNOT reach a database on your local Mac (localhost:3306 here is
+# the runner, not your machine). This workflow only works if MYSQL_HOST
+# points at a network-reachable database. For the local-Mac setup, use the
+# cron job instead (see README / run_daily_update.sh). It is kept here and
+# can be triggered manually via the "Run workflow" button.
+
+on:
+  schedule:
+    - cron: "0 20 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  update-prices:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests mysql-connector-python
+
+      - name: Run daily price update
+        env:
+          # Override the hard-coded localhost in scraper.py via repo secrets.
+          # A self-hosted runner on your network (or a reachable DB host) is
+          # required for these to mean anything.
+          MYSQL_HOST: ${{ secrets.MYSQL_HOST }}
+          MYSQL_PORT: ${{ secrets.MYSQL_PORT }}
+          MYSQL_USER: ${{ secrets.MYSQL_USER }}
+          MYSQL_PASSWORD: ${{ secrets.MYSQL_PASSWORD }}
+        run: python daily_price_update.py
